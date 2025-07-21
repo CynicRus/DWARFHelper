@@ -1,7 +1,7 @@
 # DWARFHelper Plugin
 
 ## Overview
-DWARFHelper is a plugin for x64dbg, designed to load DWARF debug symbols from executable files (e.g., `.exe`, `.dll`) and apply them as labels and function information within the debugger. It supports both 32-bit and 64-bit architectures and integrates with the x64dbg plugin system to enhance debugging capabilities by parsing DWARF debug information.
+DWARFDbgHelper is a plugin for x64dbg, designed to load DWARF debug symbols from executable files (e.g., `.exe`, `.dll`) and apply them as labels and function information within the debugger. It supports both 32-bit and 64-bit architectures and integrates with the x64dbg plugin system to enhance debugging capabilities by parsing DWARF debug information.
 
 ## Features
 - **Load DWARF Symbols**: Extracts symbols (functions, variables, labels) from DWARF debug information in executable files and sets them as labels in x64dbg.
@@ -19,7 +19,7 @@ DWARFHelper is a plugin for x64dbg, designed to load DWARF debug symbols from ex
 These libraries must be available in the appropriate architecture (x86 or x64) as specified in the code.
 
 ## Build Instructions
-To build the DWARFHelper plugin, follow these steps:
+To build the DWARFDbgHelper plugin, follow these steps:
 
 1. **Install Dependencies**:
    - Ensure `Libdwarf` is installed and available in your build environment.
@@ -48,8 +48,6 @@ To build the DWARFHelper plugin, follow these steps:
 ## Usage
 1. **Start Debugging**: Open a process in x64dbg to enable the plugin functionality. Pause the process at a valid instruction pointer (EIP/RIP) for your main module.
                         The plugin locates module base relative to the current EIP/RIP, so this step is required.
-
-
 2. **Load DWARF Symbols**:
    - Go to the Plugins menu and select "Load DWARF Symbols from File".
    - A file dialog will open, allowing you to select an executable file (`.exe`, `.dll`) containing DWARF debug information.
