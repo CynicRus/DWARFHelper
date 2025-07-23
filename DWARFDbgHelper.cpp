@@ -6,6 +6,7 @@
 #include <vector>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <fstream>
 #include <dwarf.h>
 #include <libdwarf.h>
@@ -58,7 +59,7 @@
 // Plugin SDK definitions
 #define PLUGIN_NAME "DWARFHelper"
 #define PLUGIN_VERSION 1
- #define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define DPRINTF(x, ...) _plugin_logprintf("[" PLUGIN_NAME "] " x "\n", __VA_ARGS__)
 #define DPUTS(x) _plugin_logprintf("[" PLUGIN_NAME "] %s\n", x)
@@ -115,8 +116,8 @@ struct Symbol
     duint size;
     duint endAddress;
     std::string fileName;
-    std::string type;       
-    LocationInfo location;   
+    std::string type;
+    LocationInfo location;
     std::string compDir;     // Compilation directory
     int line;                // Line number where declared
     bool isExternal;         // External symbol
@@ -249,6 +250,63 @@ duint GetImageBaseFromHeaders(const void *imageData, size_t imageSize)
     return imageBase;
 }
 
+// Get base module address from the x64dbg
+static duint GetModuleBase()
+{
+    duint currentEIP = GetCurrentEIP();
+    if (!currentEIP)
+        return 0;
+        
+    char moduleName[MAX_PATH] = "";
+    if (!DbgGetModuleAt(currentEIP, moduleName))
+        return 0;
+        
+    auto* dbgFuncs = DbgFunctions();
+    if (!dbgFuncs)
+        return 0;
+        
+    return dbgFuncs->ModBaseFromName(moduleName);
+}
+
+// Get module size
+static duint GetModuleSize(duint moduleBase)
+{
+    if (!moduleBase)
+        return 0;
+        
+    MODULEINFO modInfo = {0};
+    HANDLE hProcess = GetCurrentProcess();
+    HMODULE hModule = (HMODULE)moduleBase;
+    
+    if (GetModuleInformation(hProcess, hModule, &modInfo, sizeof(MODULEINFO)))
+        return modInfo.SizeOfImage;
+        
+    return 0;
+}
+
+// Get image base from PE headers
+static duint GetImageBaseFromPE(const std::filesystem::path& filePath)
+{
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open())
+        return 0;
+        
+    file.seekg(0, std::ios::end);
+    size_t fileSize = file.tellg();
+    file.seekg(0);
+    
+    if (fileSize < sizeof(IMAGE_DOS_HEADER))
+        return 0;
+        
+    std::vector<char> buffer(fileSize);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    
+    return GetImageBaseFromHeaders(buffer.data(), fileSize);
+}
+
+
+
 // Validate address within module bounds
 static bool IsValidModuleAddress(duint address, duint modBase, duint modSize)
 {
@@ -331,6 +389,172 @@ static duint GetFunctionSize(Dwarf_Die function_die, Dwarf_Debug dbg, Dwarf_Addr
     }
 
     return size;
+}
+
+
+inline duint RebaseAddress(duint value, duint imageBase, duint runtimeBase)
+{
+    if (imageBase != runtimeBase)
+        return value - imageBase + runtimeBase;
+    return value;
+}
+
+// Parse COFF symbols from PE file
+static void ParseCOFFSymbols(const std::filesystem::path& path, duint runtimeBase, duint imageBase, duint modSize, std::vector<Symbol>& loadedSymbols)
+{
+    DPUTS("Entering ParseCOFFSymbols");
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open())
+    {
+        DPUTS("Failed to open file for COFF parsing");
+        return;
+    }
+
+    file.seekg(0, std::ios::end);
+    size_t fileSize = file.tellg();
+    file.seekg(0);
+    std::vector<char> fileData(fileSize);
+    file.read(fileData.data(), fileSize);
+    file.close();
+
+    const IMAGE_DOS_HEADER* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(fileData.data());
+    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+    {
+        DPUTS("Invalid DOS signature for COFF");
+        return;
+    }
+
+    const IMAGE_NT_HEADERS* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        fileData.data() + dosHeader->e_lfanew);
+    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+    {
+        DPUTS("Invalid NT signature for COFF");
+        return;
+    }
+
+    const IMAGE_FILE_HEADER* fileHeader = &ntHeaders->FileHeader;
+    if (fileHeader->NumberOfSymbols == 0 || fileHeader->PointerToSymbolTable == 0)
+    {
+        DPUTS("No COFF symbols found");
+        return;
+    }
+
+    const IMAGE_SYMBOL* symbolTable = reinterpret_cast<const IMAGE_SYMBOL*>(
+        fileData.data() + fileHeader->PointerToSymbolTable);
+    const char* stringTable = fileData.data() + fileHeader->PointerToSymbolTable +
+                             fileHeader->NumberOfSymbols * sizeof(IMAGE_SYMBOL);
+    const IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(ntHeaders);
+
+    std::unordered_set<std::string> existingNames;
+    std::unordered_set<duint> existingAddresses;
+    for (const auto& sym : loadedSymbols)
+    {
+        existingNames.insert(sym.name);
+        if (sym.address != 0)
+            existingAddresses.insert(sym.address);
+    }
+
+    int coffSymbolCount = 0;
+    for (DWORD i = 0; i < fileHeader->NumberOfSymbols; ++i)
+    {
+        const IMAGE_SYMBOL& sym = symbolTable[i];
+        std::string name;
+
+        // Handle symbol name
+        if (sym.N.Name.Short != 0)
+        {
+            size_t len = 0;
+            for (len = 0; len < 8 && sym.N.ShortName[len] != 0; ++len) {}
+            name = std::string(reinterpret_cast<const char*>(sym.N.ShortName), len);
+        }
+        else
+        {
+            name = stringTable + sym.N.Name.Long;
+        }
+
+        // Skip empty names, section names, or compiler-generated symbols
+        if (name.empty() || name[0] == '.' || name.find("__") == 0)
+        {
+            DPRINTF("Skipped COFF symbol %s: invalid or compiler-generated name", name.c_str());
+            i += sym.NumberOfAuxSymbols;
+            continue;
+        }
+
+        // Skip symbols with invalid section numbers
+        if (sym.SectionNumber <= 0 || sym.SectionNumber > fileHeader->NumberOfSections)
+        {
+            DPRINTF("Skipped COFF symbol %s: invalid section number %d", name.c_str(), sym.SectionNumber);
+            i += sym.NumberOfAuxSymbols;
+            continue;
+        }
+
+        // Skip static symbols with zero value
+        if (sym.StorageClass == IMAGE_SYM_CLASS_STATIC && sym.Value == 0)
+        {
+            DPRINTF("Skipped COFF symbol %s: static symbol with zero value", name.c_str());
+            i += sym.NumberOfAuxSymbols;
+            continue;
+        }
+
+        // Calculate virtual address: sym.Value (section offset) + section's VA, then rebase
+        const IMAGE_SECTION_HEADER& section = sections[sym.SectionNumber - 1];
+        duint sectionVA = section.VirtualAddress + imageBase; // Use imageBase initially
+        duint address = RebaseAddress(sym.Value + sectionVA, imageBase, runtimeBase);
+
+        // Validate address against module bounds
+        if (modSize > 0 && !IsValidModuleAddress(address, runtimeBase, modSize))
+        {
+            DPRINTF("Skipped COFF symbol %s: address 0x%llX outside module range", name.c_str(), address);
+            i += sym.NumberOfAuxSymbols;
+            continue;
+        }
+
+        // Skip duplicates
+        if (existingNames.count(name) || existingAddresses.count(address))
+        {
+            DPRINTF("Skipped duplicate COFF symbol %s at 0x%llX", name.c_str(), address);
+            i += sym.NumberOfAuxSymbols;
+            continue;
+        }
+
+        // Determine if symbol is a function
+        bool isFunction = (sym.Type & 0x20) != 0 && (section.Characteristics & IMAGE_SCN_MEM_EXECUTE);
+        bool isData = !isFunction && (sym.StorageClass == IMAGE_SYM_CLASS_EXTERNAL || sym.StorageClass == IMAGE_SYM_CLASS_STATIC);
+
+        // Get section permissions
+        std::string permissions;
+        permissions += (section.Characteristics & IMAGE_SCN_MEM_READ) ? "R" : "";
+        permissions += (section.Characteristics & IMAGE_SCN_MEM_WRITE) ? "W" : "";
+        permissions += (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) ? "E" : "";
+
+        // Create symbol
+        Symbol symbol = {
+            CleanSymbolName(name),
+            address,
+            isFunction,
+            0, // Size often unavailable in COFF
+            address,
+            "",
+            isFunction ? "function" : "data",
+            {LocationInfo::INVALID, 0, 0, 0, {}},
+            "",
+            0,
+            (sym.StorageClass == IMAGE_SYM_CLASS_EXTERNAL),
+            name
+        };
+
+        loadedSymbols.push_back(symbol);
+        existingNames.insert(symbol.name);
+        existingAddresses.insert(symbol.address);
+        coffSymbolCount++;
+        DPRINTF("Added COFF symbol: %s at 0x%llX (%s, %s)", symbol.name.c_str(), symbol.address, isFunction ? "function" : "data", permissions.c_str());
+
+        // Skip auxiliary symbols
+        i += sym.NumberOfAuxSymbols;
+    }
+
+    DPRINTF("ParseCOFFSymbols: Loaded %d COFF symbols", coffSymbolCount);
 }
 
 // Process DWARF location expression
@@ -552,7 +776,7 @@ LocationInfo ProcessLocationExpression(Dwarf_Debug dbg, Dwarf_Attribute attr, Dw
     return loc;
 }
 
-// Get type information - ИСПРАВЛЕНО
+// Get type information
 std::string GetTypeInfo(Dwarf_Debug dbg, Dwarf_Die die, Dwarf_Error *error)
 {
     Dwarf_Attribute type_attr = 0;
@@ -569,7 +793,7 @@ std::string GetTypeInfo(Dwarf_Debug dbg, Dwarf_Die die, Dwarf_Error *error)
             }
 
             Dwarf_Die type_die = 0;
-            // ИСПРАВЛЕНО: использование dwarf_offdie_b
+
             if (dwarf_offdie_b(dbg, type_offset, TRUE, &type_die, error) == DW_DLV_OK)
             {
                 char *type_name = 0;
@@ -1002,9 +1226,12 @@ std::vector<Symbol> ParseDWARFFile(const std::filesystem::path &path, duint runt
 
         auto lineInfos = ParseDWARFLineInfo(dbg, dwarfImageBase, runtimeBase, modSize);
         DPRINTF("Processed %zu line info entries", lineInfos.size());
+        
 
         dwarf_finish(dbg);
 
+        ParseCOFFSymbols(path, runtimeBase, dwarfImageBase, modSize, loadedSymbols);
+        
         DPRINTF("ParseDWARFFile completed: %zu symbols loaded", loadedSymbols.size());
         return loadedSymbols;
     }
@@ -1097,8 +1324,10 @@ void LoadSymbols(duint runtimeBase, const std::vector<Symbol> &loadedSymbols)
 
             if (sym.isFunction)
             {
+                std::string lineStr = (sym.line > 0) ? (":" + std::to_string(sym.line)) : "";
+
                 snprintf(comment, sizeof(comment),
-                         "Function: %s%s%s (size: %llu)%s%s - %s%s%s",
+                         "Function: %s%s%s (size: %llu)%s%s - %s%s",
                          sym.name.c_str(),
                          sym.type.empty() ? "" : " -> ",
                          sym.type.c_str(),
@@ -1107,19 +1336,21 @@ void LoadSymbols(duint runtimeBase, const std::vector<Symbol> &loadedSymbols)
                          sym.linkageName.c_str(),
                          sym.linkageName.empty() ? "" : "]",
                          filename.c_str(),
-                         sym.line > 0 ? (":" + std::to_string(sym.line)).c_str() : "");
+                         lineStr.c_str());
             }
             else
             {
+                std::string symStr = (sym.line > 0) ? (":" + std::to_string(sym.line)) : "";
+
                 snprintf(comment, sizeof(comment),
-                         "Symbol: %s%s%s%s - %s%s%s",
+                         "Symbol: %s%s%s%s - %s%s",
                          sym.name.c_str(),
                          sym.type.empty() ? "" : " (",
                          sym.type.c_str(),
                          sym.type.empty() ? "" : ")",
                          locationStr.c_str(),
                          filename.c_str(),
-                         sym.line > 0 ? (":" + std::to_string(sym.line)).c_str() : "");
+                         symStr.c_str());
             }
 
             if (sym.address != 0 && DbgSetCommentAt(sym.address, comment))
