@@ -10,6 +10,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <regex>
 #include <dwarf.h>
 #include <libdwarf.h>
 #include "bridgemain.h"
@@ -128,89 +129,108 @@ struct LineInfo
 };
 
 // RAII wrapper for automatic DWARF attribute cleanup
-class DwarfAttributeGuard {
+class DwarfAttributeGuard
+{
 public:
     explicit DwarfAttributeGuard(Dwarf_Attribute attr) : attr_(attr) {}
-    ~DwarfAttributeGuard() {
-        if (attr_) {
+    ~DwarfAttributeGuard()
+    {
+        if (attr_)
+        {
             dwarf_dealloc_attribute(attr_);
         }
     }
-    
-    DwarfAttributeGuard(const DwarfAttributeGuard&) = delete;
-    DwarfAttributeGuard& operator=(const DwarfAttributeGuard&) = delete;
-    
+
+    DwarfAttributeGuard(const DwarfAttributeGuard &) = delete;
+    DwarfAttributeGuard &operator=(const DwarfAttributeGuard &) = delete;
+
 private:
     Dwarf_Attribute attr_;
 };
 
 // Check if DIE tag represents a symbol we want to process
-[[nodiscard]] inline bool IsSymbolTag(Dwarf_Half tag) noexcept {
+[[nodiscard]] inline bool IsSymbolTag(Dwarf_Half tag) noexcept
+{
     // Hot path optimization: most common tags first
-    switch (tag) {
-        case DW_TAG_subprogram:
-        case DW_TAG_variable:
-        case DW_TAG_inlined_subroutine:
-        case DW_TAG_formal_parameter:
-            return true;
-        case DW_TAG_label:
-        case DW_TAG_enumerator:
-        case DW_TAG_constant:
-        case DW_TAG_member:
-        case DW_TAG_namespace:
-        case DW_TAG_class_type:
-        case DW_TAG_structure_type:
-        case DW_TAG_union_type:
-        case DW_TAG_enumeration_type:
-        case DW_TAG_typedef:
-            return true;
-        default:
-            return false;
+    switch (tag)
+    {
+    case DW_TAG_subprogram:
+    case DW_TAG_variable:
+    case DW_TAG_inlined_subroutine:
+    case DW_TAG_formal_parameter:
+        return true;
+    case DW_TAG_label:
+    case DW_TAG_enumerator:
+    case DW_TAG_constant:
+    case DW_TAG_member:
+    case DW_TAG_namespace:
+    case DW_TAG_class_type:
+    case DW_TAG_structure_type:
+    case DW_TAG_union_type:
+    case DW_TAG_enumeration_type:
+    case DW_TAG_typedef:
+        return true;
+    default:
+        return false;
     }
 }
 
 // Check if DIE tag represents a function-like symbol
-[[nodiscard]] inline bool IsFunctionTag(Dwarf_Half tag) noexcept {
+[[nodiscard]] inline bool IsFunctionTag(Dwarf_Half tag) noexcept
+{
     return tag == DW_TAG_subprogram || tag == DW_TAG_inlined_subroutine;
 }
 
 // Validate symbol name quality
-[[nodiscard]] bool IsValidSymbolName(const char* name) noexcept {
-    if (!name) return false;
-    
+[[nodiscard]] bool IsValidSymbolName(const char *name) noexcept
+{
+    if (!name)
+        return false;
+
     const size_t len = strlen(name);
-    if (len == 0 || len > 2048) return false; // Reasonable length limits
-    
+    if (len == 0 || len > 2048)
+        return false; // Reasonable length limits
+
     // Filter out compiler-generated garbage
-    if (len >= 3 && name[0] == '_' && name[1] == '_' && name[2] == '_') return false;
-    if (strstr(name, "..") != nullptr) return false; // Likely corrupted
-    if (strstr(name, "\x00") != nullptr) return false; // Embedded nulls
-    
+    if (len >= 3 && name[0] == '_' && name[1] == '_' && name[2] == '_')
+        return false;
+    if (strstr(name, "..") != nullptr)
+        return false; // Likely corrupted
+    if (strstr(name, "\x00") != nullptr)
+        return false; // Embedded nulls
+
     // Check for reasonable character content
     size_t printable_count = 0;
-    for (size_t i = 0; i < len; ++i) {
+    for (size_t i = 0; i < len; ++i)
+    {
         unsigned char c = static_cast<unsigned char>(name[i]);
-        if (c >= 32 && c <= 126) { // Printable ASCII
+        if (c >= 32 && c <= 126)
+        { // Printable ASCII
             ++printable_count;
-        } else if (c < 32 && c != '\t') { // Control chars except tab
+        }
+        else if (c < 32 && c != '\t')
+        { // Control chars except tab
             return false;
         }
     }
-    
+
     // At least 80% should be printable
     return (printable_count * 5) >= (len * 4);
 }
 
 // Validate function size for reasonableness
-[[nodiscard]] bool IsValidFunctionSize(duint size) noexcept {
+[[nodiscard]] bool IsValidFunctionSize(duint size) noexcept
+{
     return size > 0 && size <= 0x10000000; // Max 256MB - reasonable function limit
 }
 
 // Manages address translation between DWARF and runtime addresses
-class AddressTranslator {
+class AddressTranslator
+{
 public:
     // Initialize with DWARF and runtime base addresses
-    void Initialize(duint dwarf_base, duint runtime_base) {
+    void Initialize(duint dwarf_base, duint runtime_base)
+    {
         imageBase = dwarf_base;
         runtimeBase = runtime_base;
         baseOffset = runtime_base - dwarf_base;
@@ -220,15 +240,16 @@ public:
     }
 
     // Translate DWARF address to runtime address, caching results
-    duint TranslateAddress(duint dwarf_addr) {
-        if (imageBase == 0 && runtimeBase == 0) return dwarf_addr;
+    duint TranslateAddress(duint dwarf_addr)
+    {
+        if (imageBase == 0 && runtimeBase == 0)
+            return dwarf_addr;
 
         auto it = dwarfToRuntime.find(dwarf_addr);
-        if (it != dwarfToRuntime.end()) return it->second;
+        if (it != dwarfToRuntime.end())
+            return it->second;
 
-        duint runtime_addr = (dwarf_addr >= imageBase) ? 
-            (dwarf_addr - imageBase) + runtimeBase : 
-            dwarf_addr + runtimeBase;
+        duint runtime_addr = (dwarf_addr >= imageBase) ? (dwarf_addr - imageBase) + runtimeBase : dwarf_addr + runtimeBase;
 
         dwarfToRuntime[dwarf_addr] = runtime_addr;
         DPRINTF("Translated address: 0x%llX -> 0x%llX (imageBase=0x%llX, runtimeBase=0x%llX)",
@@ -244,21 +265,25 @@ private:
 };
 
 // Handles file operations and utility functions
-class FileHandler {
+class FileHandler
+{
 public:
     // Opens a file dialog to select an executable file
-    static std::optional<std::filesystem::path> OpenFileDialog(duint runtimeBase) {
+    static std::optional<std::filesystem::path> OpenFileDialog(duint runtimeBase)
+    {
         DPUTS("Entering OpenFileDialog");
         HRESULT hr = CoInitialize(NULL);
-        if (FAILED(hr)) {
+        if (FAILED(hr))
+        {
             DPRINTF("CoInitialize failed, HRESULT=0x%X", hr);
             MessageBoxA(NULL, "Failed to initialize COM.", PLUGIN_NAME, MB_OK | MB_ICONERROR);
             return std::nullopt;
         }
 
-        IFileOpenDialog* pFileOpen = nullptr;
+        IFileOpenDialog *pFileOpen = nullptr;
         hr = CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pFileOpen));
-        if (FAILED(hr)) {
+        if (FAILED(hr))
+        {
             DPRINTF("CoCreateInstance failed, HRESULT=0x%X", hr);
             MessageBoxA(NULL, "Failed to create file open dialog.", PLUGIN_NAME, MB_OK | MB_ICONERROR);
             CoUninitialize();
@@ -267,20 +292,22 @@ public:
 
         COMDLG_FILTERSPEC fileTypes[] = {
             {L"Executable Files (*.exe;*.dll;*.elf)", L"*.exe;*.dll;*.elf"},
-            {L"All Files (*.*)", L"*.*"}
-        };
+            {L"All Files (*.*)", L"*.*"}};
         pFileOpen->SetFileTypes(2, fileTypes);
         pFileOpen->SetDefaultExtension(L"exe");
 
         char modulePath[MAX_PATH] = "";
         char initialDir[MAX_PATH] = "";
-        if (DbgFunctions()->ModPathFromAddr(runtimeBase, modulePath, MAX_PATH)) {
+        if (DbgFunctions()->ModPathFromAddr(runtimeBase, modulePath, MAX_PATH))
+        {
             strncpy_s(initialDir, modulePath, MAX_PATH);
-            char* lastSlash = strrchr(initialDir, '\\');
-            if (lastSlash) *lastSlash = '\0';
+            char *lastSlash = strrchr(initialDir, '\\');
+            if (lastSlash)
+                *lastSlash = '\0';
             std::wstring wInitialDir = std::wstring(initialDir, initialDir + strlen(initialDir));
-            IShellItem* pFolder = NULL;
-            if (SUCCEEDED(SHCreateItemFromParsingName(wInitialDir.c_str(), NULL, IID_PPV_ARGS(&pFolder)))) {
+            IShellItem *pFolder = NULL;
+            if (SUCCEEDED(SHCreateItemFromParsingName(wInitialDir.c_str(), NULL, IID_PPV_ARGS(&pFolder))))
+            {
                 pFileOpen->SetFolder(pFolder);
                 pFolder->Release();
             }
@@ -288,18 +315,21 @@ public:
 
         HWND hwnd = GuiGetWindowHandle();
         hr = pFileOpen->Show(hwnd && IsWindow(hwnd) ? hwnd : NULL);
-        if (FAILED(hr)) {
+        if (FAILED(hr))
+        {
             pFileOpen->Release();
             CoUninitialize();
             return std::nullopt;
         }
 
-        IShellItem* pItem = NULL;
+        IShellItem *pItem = NULL;
         hr = pFileOpen->GetResult(&pItem);
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             PWSTR pszFilePath = NULL;
             hr = pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath);
-            if (SUCCEEDED(hr)) {
+            if (SUCCEEDED(hr))
+            {
                 char filePath[MAX_PATH] = "";
                 WideCharToMultiByte(CP_ACP, 0, pszFilePath, -1, filePath, MAX_PATH, NULL, NULL);
                 DPRINTF("Selected file: %s", filePath);
@@ -317,24 +347,29 @@ public:
     }
 
     // Extracts image base from PE headers
-    static duint GetImageBaseFromHeaders(const void* imageData, size_t imageSize) {
-        if (!imageData || imageSize < sizeof(IMAGE_DOS_HEADER)) return 0;
+    static duint GetImageBaseFromHeaders(const void *imageData, size_t imageSize)
+    {
+        if (!imageData || imageSize < sizeof(IMAGE_DOS_HEADER))
+            return 0;
 
-        const IMAGE_DOS_HEADER* dosHeader = static_cast<const IMAGE_DOS_HEADER*>(imageData);
-        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+        const IMAGE_DOS_HEADER *dosHeader = static_cast<const IMAGE_DOS_HEADER *>(imageData);
+        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+        {
             DPUTS("Invalid DOS signature");
             return 0;
         }
 
-        if (static_cast<size_t>(dosHeader->e_lfanew) >= imageSize || dosHeader->e_lfanew < 0) {
+        if (static_cast<size_t>(dosHeader->e_lfanew) >= imageSize || dosHeader->e_lfanew < 0)
+        {
             DPUTS("Invalid PE header offset");
             return 0;
         }
 
-        const IMAGE_NT_HEADERS* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(
-            static_cast<const char*>(imageData) + dosHeader->e_lfanew);
+        const IMAGE_NT_HEADERS *ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS *>(
+            static_cast<const char *>(imageData) + dosHeader->e_lfanew);
 
-        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+        {
             DPUTS("Invalid NT signature");
             return 0;
         }
@@ -345,22 +380,26 @@ public:
     }
 
     // Gets the base address of the current module
-    static duint GetModuleBase() {
+    static duint GetModuleBase()
+    {
         REGDUMP registers;
-        duint currentEIP = DbgIsDebugging() && DbgGetRegDumpEx(&registers, sizeof(REGDUMP)) ? 
-                           registers.regcontext.cip : 0;
-        if (!currentEIP) return 0;
+        duint currentEIP = DbgIsDebugging() && DbgGetRegDumpEx(&registers, sizeof(REGDUMP)) ? registers.regcontext.cip : 0;
+        if (!currentEIP)
+            return 0;
 
         char moduleName[MAX_PATH] = "";
-        if (!DbgGetModuleAt(currentEIP, moduleName)) return 0;
+        if (!DbgGetModuleAt(currentEIP, moduleName))
+            return 0;
 
-        auto* dbgFuncs = DbgFunctions();
+        auto *dbgFuncs = DbgFunctions();
         return dbgFuncs ? dbgFuncs->ModBaseFromName(moduleName) : 0;
     }
 
     // Gets the size of the module
-    static duint GetModuleSize(duint moduleBase) {
-        if (!moduleBase) return 0;
+    static duint GetModuleSize(duint moduleBase)
+    {
+        if (!moduleBase)
+            return 0;
 
         MODULEINFO modInfo = {0};
         if (GetModuleInformation(GetCurrentProcess(), (HMODULE)moduleBase, &modInfo, sizeof(MODULEINFO)))
@@ -369,38 +408,69 @@ public:
     }
 
     // Cleans symbol names for x64dbg compatibility
-    static std::string CleanSymbolName(const std::string& name) {
+    static std::string CleanSymbolName(const std::string &name)
+    {
         std::string cleaned = name;
-        for (char& c : cleaned) {
-            if (c == '$' || c == ':' || c == '@' || (!std::isalnum(c) && c != '_')) {
+
+        std::regex multiUnderscore("_{3,}"); 
+        cleaned = std::regex_replace(cleaned, multiUnderscore, "::");
+
+        std::regex doubleUnderscore("__");
+        cleaned = std::regex_replace(cleaned, doubleUnderscore, "::");
+
+        std::regex finalizerPattern(R"(\$\$_fin\$[0-9A-F]+$)");
+        cleaned = std::regex_replace(cleaned, finalizerPattern, "");
+
+        std::replace(cleaned.begin(), cleaned.end(), '$', ':');
+        std::regex quadColon("::::");
+        cleaned = std::regex_replace(cleaned, quadColon, "::");
+
+        for (char &c : cleaned)
+        {
+            if (!std::isalnum(c) && c != '_' && c != ':')
+            {
                 c = '_';
             }
         }
-        while (!cleaned.empty() && cleaned.front() == '_') cleaned.erase(cleaned.begin());
-        while (!cleaned.empty() && cleaned.back() == '_') cleaned.pop_back();
+
+        while (!cleaned.empty() && (cleaned.front() == '_' || cleaned.front() == ':'))
+            cleaned.erase(cleaned.begin());
+        while (!cleaned.empty() && (cleaned.back() == '_' || cleaned.back() == ':'))
+            cleaned.pop_back();
+
+        std::regex emptySegments("::{2,}");
+        cleaned = std::regex_replace(cleaned, emptySegments, "::");
+
         return cleaned.empty() ? "Symbol" : cleaned;
     }
 
     // Validates if an address is within module bounds
-    static bool IsValidModuleAddress(duint address, duint modBase, duint modSize) {
+    static bool IsValidModuleAddress(duint address, duint modBase, duint modSize)
+    {
         return address >= modBase && address < modBase + modSize;
     }
 };
 
 // Parses DWARF debug information from executable files
-class DwarfParser {
+class DwarfParser
+{
 public:
-    DwarfParser(duint runtimeBase) : runtimeBase(runtimeBase) {
+    DwarfParser(duint runtimeBase) : runtimeBase(runtimeBase)
+    {
         modSize = FileHandler::GetModuleSize(runtimeBase);
     }
 
-    ~DwarfParser() {
-        if (dbg) dwarf_finish(dbg);
+    ~DwarfParser()
+    {
+        if (dbg)
+            dwarf_finish(dbg);
     }
 
     // Main entry point for parsing DWARF data
-    bool ParseFile(const std::filesystem::path& path) {
-        if (!OpenFile(path)) return false;
+    bool ParseFile(const std::filesystem::path &path)
+    {
+        if (!OpenFile(path))
+            return false;
         ParseCompilationUnits();
         ParseLineInfo();
         ParseCOFFSymbols(path);
@@ -408,15 +478,17 @@ public:
     }
 
     // Accessors for parsed data
-    const std::vector<Symbol>& GetSymbols() const { return loadedSymbols; }
-    const std::vector<LineInfo>& GetLineInfo() const { return lineInfos; }
+    const std::vector<Symbol> &GetSymbols() const { return loadedSymbols; }
+    const std::vector<LineInfo> &GetLineInfo() const { return lineInfos; }
 
 private:
     // Initializes DWARF debugging context
-    bool OpenFile(const std::filesystem::path& path) {
+    bool OpenFile(const std::filesystem::path &path)
+    {
         DPUTS("Entering OpenFile");
         std::ifstream file(path, std::ios::binary);
-        if (!file.is_open()) {
+        if (!file.is_open())
+        {
             DPUTS("Failed to open file");
             return false;
         }
@@ -430,9 +502,11 @@ private:
 
         Dwarf_Error error = 0;
         int res = dwarf_init_path_a(path.string().c_str(), NULL, 0, DW_GROUPNUMBER_ANY, 0, NULL, NULL, &dbg, &error);
-        if (res != DW_DLV_OK) {
+        if (res != DW_DLV_OK)
+        {
             DPRINTF("dwarf_init_path_a failed: %d", res);
-            if (error) {
+            if (error)
+            {
                 DPRINTF("Error: %s", dwarf_errmsg(error));
                 dwarf_dealloc_error(dbg, error);
             }
@@ -445,7 +519,8 @@ private:
     }
 
     // Processes all compilation units
-    void ParseCompilationUnits() {
+    void ParseCompilationUnits()
+    {
         Dwarf_Error error = 0;
         Dwarf_Unsigned cu_header_length, abbrev_offset, next_cu_header, typeoffset;
         Dwarf_Half version, address_size, offset_size, extension_size, header_cu_type;
@@ -454,27 +529,33 @@ private:
 
         while (dwarf_next_cu_header_d(dbg, is_info, &cu_header_length, &version, &abbrev_offset,
                                       &address_size, &offset_size, &extension_size, &signature,
-                                      &typeoffset, &next_cu_header, &header_cu_type, &error) == DW_DLV_OK) {
+                                      &typeoffset, &next_cu_header, &header_cu_type, &error) == DW_DLV_OK)
+        {
             Dwarf_Die cu_die = 0;
-            if (dwarf_siblingof_b(dbg, 0, is_info, &cu_die, &error) == DW_DLV_OK) {
+            if (dwarf_siblingof_b(dbg, 0, is_info, &cu_die, &error) == DW_DLV_OK)
+            {
                 std::string currentFile, comp_dir;
-                char* cu_name = 0;
-                if (dwarf_diename(cu_die, &cu_name, &error) == DW_DLV_OK && cu_name) {
+                char *cu_name = 0;
+                if (dwarf_diename(cu_die, &cu_name, &error) == DW_DLV_OK && cu_name)
+                {
                     currentFile = cu_name;
                     dwarf_dealloc(dbg, cu_name, DW_DLA_STRING);
                 }
 
                 Dwarf_Attribute comp_dir_attr = 0;
-                if (dwarf_attr(cu_die, DW_AT_comp_dir, &comp_dir_attr, &error) == DW_DLV_OK) {
-                    char* dir_name = 0;
-                    if (dwarf_formstring(comp_dir_attr, &dir_name, &error) == DW_DLV_OK && dir_name) {
+                if (dwarf_attr(cu_die, DW_AT_comp_dir, &comp_dir_attr, &error) == DW_DLV_OK)
+                {
+                    char *dir_name = 0;
+                    if (dwarf_formstring(comp_dir_attr, &dir_name, &error) == DW_DLV_OK && dir_name)
+                    {
                         comp_dir = dir_name;
                         dwarf_dealloc(dbg, dir_name, DW_DLA_STRING);
                     }
                     dwarf_dealloc_attribute(comp_dir_attr);
                 }
 
-                if (!comp_dir.empty() && !currentFile.empty()) {
+                if (!comp_dir.empty() && !currentFile.empty())
+                {
                     compDirMap[currentFile] = comp_dir;
                 }
 
@@ -484,38 +565,50 @@ private:
                 ProcessDIE(cu_die, currentFile, comp_dir);
                 dwarf_dealloc_die(cu_die);
             }
-            if (error) dwarf_dealloc_error(dbg, error);
+            if (error)
+                dwarf_dealloc_error(dbg, error);
         }
     }
 
     // Processes DIE and its children iteratively
-    void ProcessDIE(Dwarf_Die die, const std::string& currentFile, const std::string& comp_dir) {
+    void ProcessDIE(Dwarf_Die die, const std::string &currentFile, const std::string &comp_dir)
+    {
         Dwarf_Error error = 0;
         std::vector<Dwarf_Die> die_stack;
         die_stack.reserve(64);
         die_stack.push_back(die);
 
-        while (!die_stack.empty()) {
+        while (!die_stack.empty())
+        {
             Dwarf_Die current_die = die_stack.back();
             die_stack.pop_back();
 
             Dwarf_Half tag = 0;
-            if (dwarf_tag(current_die, &tag, &error) != DW_DLV_OK) {
-                if (error) dwarf_dealloc_error(dbg, error);
+            if (dwarf_tag(current_die, &tag, &error) != DW_DLV_OK)
+            {
+                if (error)
+                    dwarf_dealloc_error(dbg, error);
                 continue;
             }
 
-            if (IsSymbolTag(tag)) {
-                char* name = nullptr;
-                if (dwarf_diename(current_die, &name, &error) == DW_DLV_OK && name && IsValidSymbolName(name)) {
+            if (IsSymbolTag(tag))
+            {
+                char *name = nullptr;
+                if (dwarf_diename(current_die, &name, &error) == DW_DLV_OK && name && IsValidSymbolName(name))
+                {
                     std::string symbolName(name);
                     dwarf_dealloc(dbg, name, DW_DLA_STRING);
-                    if (IsFunctionTag(tag)) {
+                    if (IsFunctionTag(tag))
+                    {
                         ProcessFunctionDIE(current_die, tag, symbolName, currentFile, comp_dir, &error);
-                    } else {
+                    }
+                    else
+                    {
                         ProcessVariableDIE(current_die, tag, symbolName, currentFile, comp_dir, &error);
                     }
-                } else if (name) {
+                }
+                else if (name)
+                {
                     dwarf_dealloc(dbg, name, DW_DLA_STRING);
                 }
             }
@@ -523,55 +616,63 @@ private:
             std::vector<Dwarf_Die> children;
             children.reserve(16);
             Dwarf_Die child_die = nullptr;
-            if (dwarf_child(current_die, &child_die, &error) == DW_DLV_OK) {
+            if (dwarf_child(current_die, &child_die, &error) == DW_DLV_OK)
+            {
                 children.push_back(child_die);
                 Dwarf_Die sibling_die = nullptr;
-                while (dwarf_siblingof_b(dbg, child_die, TRUE, &sibling_die, &error) == DW_DLV_OK) {
+                while (dwarf_siblingof_b(dbg, child_die, TRUE, &sibling_die, &error) == DW_DLV_OK)
+                {
                     children.push_back(sibling_die);
                     child_die = sibling_die;
                 }
             }
 
-            for (auto it = children.rbegin(); it != children.rend(); ++it) {
+            for (auto it = children.rbegin(); it != children.rend(); ++it)
+            {
                 die_stack.push_back(*it);
             }
 
-            if (error) dwarf_dealloc_error(dbg, error);
+            if (error)
+                dwarf_dealloc_error(dbg, error);
         }
     }
 
     // Processes function/subroutine DIE
-    void ProcessFunctionDIE(Dwarf_Die die, Dwarf_Half tag, const std::string& symbolName,
-                           const std::string& currentFile, const std::string& comp_dir, Dwarf_Error* error) {
+    void ProcessFunctionDIE(Dwarf_Die die, Dwarf_Half tag, const std::string &symbolName,
+                            const std::string &currentFile, const std::string &comp_dir, Dwarf_Error *error)
+    {
         Dwarf_Attribute attr = nullptr;
-        if (dwarf_attr(die, DW_AT_low_pc, &attr, error) != DW_DLV_OK) return;
+        if (dwarf_attr(die, DW_AT_low_pc, &attr, error) != DW_DLV_OK)
+            return;
         DwarfAttributeGuard guard(attr);
 
         Dwarf_Addr low_pc = 0;
-        if (dwarf_formaddr(attr, &low_pc, error) != DW_DLV_OK || low_pc == 0) return;
+        if (dwarf_formaddr(attr, &low_pc, error) != DW_DLV_OK || low_pc == 0)
+            return;
 
         const duint adjusted_addr = addressCache.TranslateAddress(static_cast<duint>(low_pc));
-        if (modSize > 0 && !FileHandler::IsValidModuleAddress(adjusted_addr, runtimeBase, modSize)) {
+        if (modSize > 0 && !FileHandler::IsValidModuleAddress(adjusted_addr, runtimeBase, modSize))
+        {
             DPRINTF("Skipped function %s: address 0x%llX outside module range",
                     symbolName.c_str(), adjusted_addr);
             return;
         }
 
         const duint symbolSize = GetFunctionSize(die, error);
-        if (!IsValidFunctionSize(symbolSize)) {
+        if (!IsValidFunctionSize(symbolSize))
+        {
             DPRINTF("Skipped function %s: invalid size %llu", symbolName.c_str(), symbolSize);
             return;
         }
 
         duint endAddress = adjusted_addr + symbolSize;
-        if (modSize > 0 && endAddress > runtimeBase + modSize) {
+        if (modSize > 0 && endAddress > runtimeBase + modSize)
+        {
             endAddress = runtimeBase + modSize;
         }
 
         Symbol symbol = {
-            FileHandler::CleanSymbolName(symbolName), adjusted_addr, true, symbolSize, endAddress,
-            currentFile, "", {LocationInfo::INVALID, 0, 0, 0, {}}, "", 0, false, ""
-        };
+            FileHandler::CleanSymbolName(symbolName), adjusted_addr, true, symbolSize, endAddress, currentFile, "", {LocationInfo::INVALID, 0, 0, 0, {}}, "", 0, false, ""};
 
         ProcessAdditionalAttributes(die, symbol, comp_dir, error);
         loadedSymbols.push_back(std::move(symbol));
@@ -580,22 +681,23 @@ private:
     }
 
     // Processes variable/parameter DIE
-    void ProcessVariableDIE(Dwarf_Die die, Dwarf_Half tag, const std::string& symbolName,
-                           const std::string& currentFile, const std::string& comp_dir, Dwarf_Error* error) {
+    void ProcessVariableDIE(Dwarf_Die die, Dwarf_Half tag, const std::string &symbolName,
+                            const std::string &currentFile, const std::string &comp_dir, Dwarf_Error *error)
+    {
         Symbol symbol = {
-            FileHandler::CleanSymbolName(symbolName), 0, false, 0, 0, currentFile, "",
-            {LocationInfo::INVALID, 0, 0, 0, {}}, "", 0, false, ""
-        };
+            FileHandler::CleanSymbolName(symbolName), 0, false, 0, 0, currentFile, "", {LocationInfo::INVALID, 0, 0, 0, {}}, "", 0, false, ""};
 
         ProcessAdditionalAttributes(die, symbol, comp_dir, error);
-        if (symbol.location.type != LocationInfo::INVALID) {
+        if (symbol.location.type != LocationInfo::INVALID)
+        {
             loadedSymbols.push_back(std::move(symbol));
             DPRINTF("Added variable: %s (type: %s)", symbol.name.c_str(), symbol.type.c_str());
         }
     }
 
     // Parses DWARF line information
-    void ParseLineInfo() {
+    void ParseLineInfo()
+    {
         Dwarf_Error error = 0;
         Dwarf_Unsigned cu_header_length = 0;
         Dwarf_Half version = 0;
@@ -611,35 +713,42 @@ private:
 
         while (dwarf_next_cu_header_d(dbg, is_info, &cu_header_length, &version, &abbrev_offset,
                                       &address_size, &offset_size, &extension_size, &signature,
-                                      &typeoffset, &next_cu_header, &header_cu_type, &error) == DW_DLV_OK) {
+                                      &typeoffset, &next_cu_header, &header_cu_type, &error) == DW_DLV_OK)
+        {
             Dwarf_Die cu_die = 0;
-            if (dwarf_siblingof_b(dbg, 0, is_info, &cu_die, &error) == DW_DLV_OK) {
+            if (dwarf_siblingof_b(dbg, 0, is_info, &cu_die, &error) == DW_DLV_OK)
+            {
                 Dwarf_Unsigned line_version = 0;
                 Dwarf_Small table_type = 0;
                 Dwarf_Line_Context line_context = 0;
-                if (dwarf_srclines_b(cu_die, &line_version, &table_type, &line_context, &error) == DW_DLV_OK) {
-                    Dwarf_Line* linebuf = 0;
+                if (dwarf_srclines_b(cu_die, &line_version, &table_type, &line_context, &error) == DW_DLV_OK)
+                {
+                    Dwarf_Line *linebuf = 0;
                     Dwarf_Signed linecount = 0;
-                    if (dwarf_srclines_from_linecontext(line_context, &linebuf, &linecount, &error) == DW_DLV_OK) {
-                        for (Dwarf_Signed i = 0; i < linecount; ++i) {
+                    if (dwarf_srclines_from_linecontext(line_context, &linebuf, &linecount, &error) == DW_DLV_OK)
+                    {
+                        for (Dwarf_Signed i = 0; i < linecount; ++i)
+                        {
                             Dwarf_Addr lineaddr = 0;
-                            char* filename = 0;
+                            char *filename = 0;
                             Dwarf_Unsigned lineno = 0;
                             if (dwarf_lineaddr(linebuf[i], &lineaddr, &error) == DW_DLV_OK &&
                                 dwarf_linesrc(linebuf[i], &filename, &error) == DW_DLV_OK &&
-                                dwarf_lineno(linebuf[i], &lineno, &error) == DW_DLV_OK) {
-                                if (lineaddr != 0 && filename && lineno != 0) {
-                                    duint adjusted_addr = dwarfImageBase ?
-                                        (static_cast<duint>(lineaddr) - dwarfImageBase) + runtimeBase :
-                                        static_cast<duint>(lineaddr) + runtimeBase;
+                                dwarf_lineno(linebuf[i], &lineno, &error) == DW_DLV_OK)
+                            {
+                                if (lineaddr != 0 && filename && lineno != 0)
+                                {
+                                    duint adjusted_addr = dwarfImageBase ? (static_cast<duint>(lineaddr) - dwarfImageBase) + runtimeBase : static_cast<duint>(lineaddr) + runtimeBase;
 
-                                    if (modSize == 0 || FileHandler::IsValidModuleAddress(adjusted_addr, runtimeBase, modSize)) {
+                                    if (modSize == 0 || FileHandler::IsValidModuleAddress(adjusted_addr, runtimeBase, modSize))
+                                    {
                                         lineInfos.push_back({std::string(filename), static_cast<unsigned int>(lineno), adjusted_addr});
                                         DPRINTF("Line info: %s:%u at DWARF addr 0x%llX -> runtime addr 0x%llX",
                                                 filename, lineno, lineaddr, adjusted_addr);
                                     }
                                 }
-                                if (filename) dwarf_dealloc(dbg, filename, DW_DLA_STRING);
+                                if (filename)
+                                    dwarf_dealloc(dbg, filename, DW_DLA_STRING);
                             }
                         }
                         dwarf_srclines_dealloc_b(line_context);
@@ -647,69 +756,75 @@ private:
                 }
                 dwarf_dealloc_die(cu_die);
             }
-            if (error) dwarf_dealloc_error(dbg, error);
+            if (error)
+                dwarf_dealloc_error(dbg, error);
         }
         DPRINTF("ParseDWARFLineInfo: Loaded %zu line entries", lineInfos.size());
     }
 
     // Parses COFF symbols as a fallback
-    void ParseCOFFSymbols(const std::filesystem::path& path) {
+    void ParseCOFFSymbols(const std::filesystem::path &path)
+    {
         DPUTS("Entering ParseCOFFSymbols");
-        const IMAGE_DOS_HEADER* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(fileData.data());
-        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) return;
+        const IMAGE_DOS_HEADER *dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER *>(fileData.data());
+        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+            return;
 
-        const IMAGE_NT_HEADERS* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        const IMAGE_NT_HEADERS *ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS *>(
             fileData.data() + dosHeader->e_lfanew);
-        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) return;
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+            return;
 
-        const IMAGE_FILE_HEADER* fileHeader = &ntHeaders->FileHeader;
-        if (fileHeader->NumberOfSymbols == 0 || fileHeader->PointerToSymbolTable == 0) return;
+        const IMAGE_FILE_HEADER *fileHeader = &ntHeaders->FileHeader;
+        if (fileHeader->NumberOfSymbols == 0 || fileHeader->PointerToSymbolTable == 0)
+            return;
 
-        const IMAGE_SYMBOL* symbolTable = reinterpret_cast<const IMAGE_SYMBOL*>(
+        const IMAGE_SYMBOL *symbolTable = reinterpret_cast<const IMAGE_SYMBOL *>(
             fileData.data() + fileHeader->PointerToSymbolTable);
-        const char* stringTable = fileData.data() + fileHeader->PointerToSymbolTable +
-                                fileHeader->NumberOfSymbols * sizeof(IMAGE_SYMBOL);
-        const IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(ntHeaders);
+        const char *stringTable = fileData.data() + fileHeader->PointerToSymbolTable +
+                                  fileHeader->NumberOfSymbols * sizeof(IMAGE_SYMBOL);
+        const IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(ntHeaders);
 
         std::unordered_set<std::string> existingNames;
         std::unordered_set<duint> existingAddresses;
-        for (const auto& sym : loadedSymbols) {
+        for (const auto &sym : loadedSymbols)
+        {
             existingNames.insert(sym.name);
-            if (sym.address != 0) existingAddresses.insert(sym.address);
+            if (sym.address != 0)
+                existingAddresses.insert(sym.address);
         }
 
-        for (DWORD i = 0; i < fileHeader->NumberOfSymbols; ++i) {
-            const IMAGE_SYMBOL& sym = symbolTable[i];
-            std::string name = sym.N.Name.Short ? 
-                std::string(reinterpret_cast<const char*>(sym.N.ShortName), 8) :
-                std::string(stringTable + sym.N.Name.Long);
+        for (DWORD i = 0; i < fileHeader->NumberOfSymbols; ++i)
+        {
+            const IMAGE_SYMBOL &sym = symbolTable[i];
+            std::string name = sym.N.Name.Short ? std::string(reinterpret_cast<const char *>(sym.N.ShortName), 8) : std::string(stringTable + sym.N.Name.Long);
             name = name.c_str(); // Trim null characters
 
             if (name.empty() || name[0] == '.' || name.find("__") == 0 ||
                 sym.SectionNumber <= 0 || sym.SectionNumber > fileHeader->NumberOfSections ||
-                (sym.StorageClass == IMAGE_SYM_CLASS_STATIC && sym.Value == 0)) {
+                (sym.StorageClass == IMAGE_SYM_CLASS_STATIC && sym.Value == 0))
+            {
                 i += sym.NumberOfAuxSymbols;
                 continue;
             }
 
-            const IMAGE_SECTION_HEADER& section = sections[sym.SectionNumber - 1];
+            const IMAGE_SECTION_HEADER &section = sections[sym.SectionNumber - 1];
             duint address = addressCache.TranslateAddress(sym.Value + section.VirtualAddress + dwarfImageBase);
-            if (modSize > 0 && !FileHandler::IsValidModuleAddress(address, runtimeBase, modSize)) {
+            if (modSize > 0 && !FileHandler::IsValidModuleAddress(address, runtimeBase, modSize))
+            {
                 i += sym.NumberOfAuxSymbols;
                 continue;
             }
 
-            if (existingNames.count(name) || existingAddresses.count(address)) {
+            if (existingNames.count(name) || existingAddresses.count(address))
+            {
                 i += sym.NumberOfAuxSymbols;
                 continue;
             }
 
             bool isFunction = (sym.Type & 0x20) != 0 && (section.Characteristics & IMAGE_SCN_MEM_EXECUTE);
             Symbol symbol = {
-                FileHandler::CleanSymbolName(name), address, isFunction, 0, address, "",
-                isFunction ? "function" : "data", {LocationInfo::INVALID, 0, 0, 0, {}},
-                "", 0, (sym.StorageClass == IMAGE_SYM_CLASS_EXTERNAL), name
-            };
+                FileHandler::CleanSymbolName(name), address, isFunction, 0, address, "", isFunction ? "function" : "data", {LocationInfo::INVALID, 0, 0, 0, {}}, "", 0, (sym.StorageClass == IMAGE_SYM_CLASS_EXTERNAL), name};
 
             loadedSymbols.push_back(symbol);
             existingNames.insert(symbol.name);
@@ -721,36 +836,46 @@ private:
     }
 
     // Calculates function size from DWARF attributes
-    duint GetFunctionSize(Dwarf_Die die, Dwarf_Error* error) {
+    duint GetFunctionSize(Dwarf_Die die, Dwarf_Error *error)
+    {
         duint size = 0;
         Dwarf_Attribute high_pc_attr = 0;
-        if (dwarf_attr(die, DW_AT_high_pc, &high_pc_attr, error) == DW_DLV_OK) {
+        if (dwarf_attr(die, DW_AT_high_pc, &high_pc_attr, error) == DW_DLV_OK)
+        {
             DwarfAttributeGuard guard(high_pc_attr);
             Dwarf_Half form = 0;
-            if (dwarf_whatform(high_pc_attr, &form, error) == DW_DLV_OK) {
-                if (form == DW_FORM_addr) {
+            if (dwarf_whatform(high_pc_attr, &form, error) == DW_DLV_OK)
+            {
+                if (form == DW_FORM_addr)
+                {
                     Dwarf_Addr high_pc = 0;
-                    if (dwarf_formaddr(high_pc_attr, &high_pc, error) == DW_DLV_OK && high_pc > 0) {
+                    if (dwarf_formaddr(high_pc_attr, &high_pc, error) == DW_DLV_OK && high_pc > 0)
+                    {
                         size = static_cast<duint>(high_pc - addressCache.TranslateAddress(high_pc));
                     }
                 }
                 else if (form == DW_FORM_data1 || form == DW_FORM_data2 ||
                          form == DW_FORM_data4 || form == DW_FORM_data8 ||
-                         form == DW_FORM_udata) {
+                         form == DW_FORM_udata)
+                {
                     Dwarf_Unsigned offset = 0;
-                    if (dwarf_formudata(high_pc_attr, &offset, error) == DW_DLV_OK) {
+                    if (dwarf_formudata(high_pc_attr, &offset, error) == DW_DLV_OK)
+                    {
                         size = static_cast<duint>(offset);
                     }
                 }
             }
         }
 
-        if (size == 0) {
+        if (size == 0)
+        {
             Dwarf_Attribute size_attr = 0;
-            if (dwarf_attr(die, DW_AT_byte_size, &size_attr, error) == DW_DLV_OK) {
+            if (dwarf_attr(die, DW_AT_byte_size, &size_attr, error) == DW_DLV_OK)
+            {
                 DwarfAttributeGuard guard(size_attr);
                 Dwarf_Unsigned size_val = 0;
-                if (dwarf_formudata(size_attr, &size_val, error) == DW_DLV_OK) {
+                if (dwarf_formudata(size_attr, &size_val, error) == DW_DLV_OK)
+                {
                     size = static_cast<duint>(size_val);
                 }
             }
@@ -760,55 +885,66 @@ private:
     }
 
     // Processes additional DIE attributes
-    void ProcessAdditionalAttributes(Dwarf_Die die, Symbol& symbol, const std::string& comp_dir, Dwarf_Error* error) {
+    void ProcessAdditionalAttributes(Dwarf_Die die, Symbol &symbol, const std::string &comp_dir, Dwarf_Error *error)
+    {
         symbol.compDir = comp_dir;
         symbol.type = GetTypeInfo(die);
 
         Dwarf_Attribute line_attr = 0;
-        if (dwarf_attr(die, DW_AT_decl_line, &line_attr, error) == DW_DLV_OK) {
+        if (dwarf_attr(die, DW_AT_decl_line, &line_attr, error) == DW_DLV_OK)
+        {
             DwarfAttributeGuard guard(line_attr);
             Dwarf_Unsigned line_no = 0;
-            if (dwarf_formudata(line_attr, &line_no, error) == DW_DLV_OK) {
+            if (dwarf_formudata(line_attr, &line_no, error) == DW_DLV_OK)
+            {
                 symbol.line = static_cast<int>(line_no);
             }
         }
 
         Dwarf_Attribute linkage_attr = 0;
         if (dwarf_attr(die, DW_AT_linkage_name, &linkage_attr, error) == DW_DLV_OK ||
-            dwarf_attr(die, DW_AT_MIPS_linkage_name, &linkage_attr, error) == DW_DLV_OK) {
+            dwarf_attr(die, DW_AT_MIPS_linkage_name, &linkage_attr, error) == DW_DLV_OK)
+        {
             DwarfAttributeGuard guard(linkage_attr);
-            char* linkage_name = 0;
-            if (dwarf_formstring(linkage_attr, &linkage_name, error) == DW_DLV_OK && linkage_name) {
+            char *linkage_name = 0;
+            if (dwarf_formstring(linkage_attr, &linkage_name, error) == DW_DLV_OK && linkage_name)
+            {
                 symbol.linkageName = linkage_name;
                 dwarf_dealloc(dbg, linkage_name, DW_DLA_STRING);
             }
         }
 
         Dwarf_Attribute external_attr = 0;
-        if (dwarf_attr(die, DW_AT_external, &external_attr, error) == DW_DLV_OK) {
+        if (dwarf_attr(die, DW_AT_external, &external_attr, error) == DW_DLV_OK)
+        {
             DwarfAttributeGuard guard(external_attr);
             Dwarf_Bool is_external = 0;
-            if (dwarf_formflag(external_attr, &is_external, error) == DW_DLV_OK) {
+            if (dwarf_formflag(external_attr, &is_external, error) == DW_DLV_OK)
+            {
                 symbol.isExternal = (is_external != 0);
             }
         }
 
         Dwarf_Attribute location_attr = 0;
-        if (dwarf_attr(die, DW_AT_location, &location_attr, error) == DW_DLV_OK) {
+        if (dwarf_attr(die, DW_AT_location, &location_attr, error) == DW_DLV_OK)
+        {
             DwarfAttributeGuard guard(location_attr);
             symbol.location = ProcessLocationExpression(location_attr);
         }
     }
 
     // Processes DWARF location expressions
-    LocationInfo ProcessLocationExpression(Dwarf_Attribute attr) {
+    LocationInfo ProcessLocationExpression(Dwarf_Attribute attr)
+    {
         LocationInfo loc = {LocationInfo::INVALID, 0, 0, 0, {}};
         Dwarf_Error error = 0;
 
         Dwarf_Loc_Head_c loclist_head = 0;
         Dwarf_Unsigned listlen = 0;
-        if (dwarf_get_loclist_c(attr, &loclist_head, &listlen, &error) == DW_DLV_OK) {
-            for (Dwarf_Unsigned i = 0; i < listlen; ++i) {
+        if (dwarf_get_loclist_c(attr, &loclist_head, &listlen, &error) == DW_DLV_OK)
+        {
+            for (Dwarf_Unsigned i = 0; i < listlen; ++i)
+            {
                 Dwarf_Small loclist_source = 0;
                 Dwarf_Addr lowpc = 0, hipc = 0;
                 Dwarf_Unsigned expr_ops_count = 0;
@@ -823,37 +959,107 @@ private:
                 if (dwarf_get_locdesc_entry_e(loclist_head, i, &lle_value, &rawlowpc, &rawhipc,
                                               &debug_addr_unavailable, &lowpc, &hipc, &expr_ops_count,
                                               &locdesc_offset, &locentry, &loclist_source,
-                                              &dw_expression_offset_out, &dw_entry_len_out, &error) == DW_DLV_OK) {
-                    if (expr_ops_count > 0) {
+                                              &dw_expression_offset_out, &dw_entry_len_out, &error) == DW_DLV_OK)
+                {
+                    if (expr_ops_count > 0)
+                    {
                         Dwarf_Small op = 0;
                         Dwarf_Unsigned opd1 = 0, opd2 = 0, opd3 = 0;
                         Dwarf_Unsigned offset_for_branch = 0;
-                        if (dwarf_get_location_op_value_c(locentry, 0, &op, &opd1, &opd2, &opd3, &offset_for_branch, &error) == DW_DLV_OK) {
+                        if (dwarf_get_location_op_value_c(locentry, 0, &op, &opd1, &opd2, &opd3, &offset_for_branch, &error) == DW_DLV_OK)
+                        {
                             loc.type = LocationInfo::EXPRESSION;
                             loc.expression.push_back(op);
-                            switch (op) {
-                                case DW_OP_addr: loc.type = LocationInfo::ADDRESS; loc.address = addressCache.TranslateAddress(static_cast<duint>(opd1)); break;
-                                case DW_OP_reg0: case DW_OP_reg1: case DW_OP_reg2: case DW_OP_reg3:
-                                case DW_OP_reg4: case DW_OP_reg5: case DW_OP_reg6: case DW_OP_reg7:
-                                case DW_OP_reg8: case DW_OP_reg9: case DW_OP_reg10: case DW_OP_reg11:
-                                case DW_OP_reg12: case DW_OP_reg13: case DW_OP_reg14: case DW_OP_reg15:
-                                case DW_OP_reg16: case DW_OP_reg17: case DW_OP_reg18: case DW_OP_reg19:
-                                case DW_OP_reg20: case DW_OP_reg21: case DW_OP_reg22: case DW_OP_reg23:
-                                case DW_OP_reg24: case DW_OP_reg25: case DW_OP_reg26: case DW_OP_reg27:
-                                case DW_OP_reg28: case DW_OP_reg29: case DW_OP_reg30: case DW_OP_reg31:
-                                    loc.type = LocationInfo::REGISTER; loc.reg = op - DW_OP_reg0; break;
-                                case DW_OP_regx: loc.type = LocationInfo::REGISTER; loc.reg = static_cast<int>(opd1); break;
-                                case DW_OP_fbreg: loc.type = LocationInfo::STACK_OFFSET; loc.offset = static_cast<int>(opd1); break;
-                                case DW_OP_breg0: case DW_OP_breg1: case DW_OP_breg2: case DW_OP_breg3:
-                                case DW_OP_breg4: case DW_OP_breg5: case DW_OP_breg6: case DW_OP_breg7:
-                                case DW_OP_breg8: case DW_OP_breg9: case DW_OP_breg10: case DW_OP_breg11:
-                                case DW_OP_breg12: case DW_OP_breg13: case DW_OP_breg14: case DW_OP_breg15:
-                                case DW_OP_breg16: case DW_OP_breg17: case DW_OP_breg18: case DW_OP_breg19:
-                                case DW_OP_breg20: case DW_OP_breg21: case DW_OP_breg22: case DW_OP_breg23:
-                                case DW_OP_breg24: case DW_OP_breg25: case DW_OP_breg26: case DW_OP_breg27:
-                                case DW_OP_breg28: case DW_OP_breg29: case DW_OP_breg30: case DW_OP_breg31:
-                                    loc.type = LocationInfo::STACK_OFFSET; loc.reg = op - DW_OP_breg0; loc.offset = static_cast<int>(opd1); break;
-                                case DW_OP_bregx: loc.type = LocationInfo::STACK_OFFSET; loc.reg = static_cast<int>(opd1); loc.offset = static_cast<int>(opd2); break;
+                            switch (op)
+                            {
+                            case DW_OP_addr:
+                                loc.type = LocationInfo::ADDRESS;
+                                loc.address = addressCache.TranslateAddress(static_cast<duint>(opd1));
+                                break;
+                            case DW_OP_reg0:
+                            case DW_OP_reg1:
+                            case DW_OP_reg2:
+                            case DW_OP_reg3:
+                            case DW_OP_reg4:
+                            case DW_OP_reg5:
+                            case DW_OP_reg6:
+                            case DW_OP_reg7:
+                            case DW_OP_reg8:
+                            case DW_OP_reg9:
+                            case DW_OP_reg10:
+                            case DW_OP_reg11:
+                            case DW_OP_reg12:
+                            case DW_OP_reg13:
+                            case DW_OP_reg14:
+                            case DW_OP_reg15:
+                            case DW_OP_reg16:
+                            case DW_OP_reg17:
+                            case DW_OP_reg18:
+                            case DW_OP_reg19:
+                            case DW_OP_reg20:
+                            case DW_OP_reg21:
+                            case DW_OP_reg22:
+                            case DW_OP_reg23:
+                            case DW_OP_reg24:
+                            case DW_OP_reg25:
+                            case DW_OP_reg26:
+                            case DW_OP_reg27:
+                            case DW_OP_reg28:
+                            case DW_OP_reg29:
+                            case DW_OP_reg30:
+                            case DW_OP_reg31:
+                                loc.type = LocationInfo::REGISTER;
+                                loc.reg = op - DW_OP_reg0;
+                                break;
+                            case DW_OP_regx:
+                                loc.type = LocationInfo::REGISTER;
+                                loc.reg = static_cast<int>(opd1);
+                                break;
+                            case DW_OP_fbreg:
+                                loc.type = LocationInfo::STACK_OFFSET;
+                                loc.offset = static_cast<int>(opd1);
+                                break;
+                            case DW_OP_breg0:
+                            case DW_OP_breg1:
+                            case DW_OP_breg2:
+                            case DW_OP_breg3:
+                            case DW_OP_breg4:
+                            case DW_OP_breg5:
+                            case DW_OP_breg6:
+                            case DW_OP_breg7:
+                            case DW_OP_breg8:
+                            case DW_OP_breg9:
+                            case DW_OP_breg10:
+                            case DW_OP_breg11:
+                            case DW_OP_breg12:
+                            case DW_OP_breg13:
+                            case DW_OP_breg14:
+                            case DW_OP_breg15:
+                            case DW_OP_breg16:
+                            case DW_OP_breg17:
+                            case DW_OP_breg18:
+                            case DW_OP_breg19:
+                            case DW_OP_breg20:
+                            case DW_OP_breg21:
+                            case DW_OP_breg22:
+                            case DW_OP_breg23:
+                            case DW_OP_breg24:
+                            case DW_OP_breg25:
+                            case DW_OP_breg26:
+                            case DW_OP_breg27:
+                            case DW_OP_breg28:
+                            case DW_OP_breg29:
+                            case DW_OP_breg30:
+                            case DW_OP_breg31:
+                                loc.type = LocationInfo::STACK_OFFSET;
+                                loc.reg = op - DW_OP_breg0;
+                                loc.offset = static_cast<int>(opd1);
+                                break;
+                            case DW_OP_bregx:
+                                loc.type = LocationInfo::STACK_OFFSET;
+                                loc.reg = static_cast<int>(opd1);
+                                loc.offset = static_cast<int>(opd2);
+                                break;
                             }
                             break;
                         }
@@ -862,35 +1068,43 @@ private:
             }
             dwarf_dealloc_loc_head_c(loclist_head);
         }
-        else {
+        else
+        {
             Dwarf_Ptr expr_bytes = 0;
             Dwarf_Unsigned expr_len = 0;
-            if (dwarf_formexprloc(attr, &expr_len, &expr_bytes, &error) == DW_DLV_OK && expr_len > 0 && expr_bytes) {
-                uint8_t* bytes = static_cast<uint8_t*>(expr_bytes);
+            if (dwarf_formexprloc(attr, &expr_len, &expr_bytes, &error) == DW_DLV_OK && expr_len > 0 && expr_bytes)
+            {
+                uint8_t *bytes = static_cast<uint8_t *>(expr_bytes);
                 loc.expression.assign(bytes, bytes + expr_len);
                 uint8_t op = bytes[0];
                 loc.type = LocationInfo::EXPRESSION;
-                if (op == DW_OP_addr && expr_len >= 1 + sizeof(duint)) {
+                if (op == DW_OP_addr && expr_len >= 1 + sizeof(duint))
+                {
                     loc.type = LocationInfo::ADDRESS;
-                    loc.address = addressCache.TranslateAddress(*reinterpret_cast<duint*>(bytes + 1));
+                    loc.address = addressCache.TranslateAddress(*reinterpret_cast<duint *>(bytes + 1));
                 }
-                else if (op == DW_OP_fbreg && expr_len >= 2) {
+                else if (op == DW_OP_fbreg && expr_len >= 2)
+                {
                     loc.type = LocationInfo::STACK_OFFSET;
                     loc.offset = static_cast<int8_t>(bytes[1]);
                 }
             }
-            else {
-                Dwarf_Block* block = 0;
-                if (dwarf_formblock(attr, &block, &error) == DW_DLV_OK && block && block->bl_len > 0 && block->bl_data) {
-                    uint8_t* bytes = static_cast<uint8_t*>(block->bl_data);
+            else
+            {
+                Dwarf_Block *block = 0;
+                if (dwarf_formblock(attr, &block, &error) == DW_DLV_OK && block && block->bl_len > 0 && block->bl_data)
+                {
+                    uint8_t *bytes = static_cast<uint8_t *>(block->bl_data);
                     loc.expression.assign(bytes, bytes + block->bl_len);
                     uint8_t op = bytes[0];
                     loc.type = LocationInfo::EXPRESSION;
-                    if (op == DW_OP_addr && block->bl_len >= 1 + sizeof(duint)) {
+                    if (op == DW_OP_addr && block->bl_len >= 1 + sizeof(duint))
+                    {
                         loc.type = LocationInfo::ADDRESS;
-                        loc.address = addressCache.TranslateAddress(*reinterpret_cast<duint*>(bytes + 1));
+                        loc.address = addressCache.TranslateAddress(*reinterpret_cast<duint *>(bytes + 1));
                     }
-                    else if (op == DW_OP_fbreg && block->bl_len >= 2) {
+                    else if (op == DW_OP_fbreg && block->bl_len >= 2)
+                    {
                         loc.type = LocationInfo::STACK_OFFSET;
                         loc.offset = static_cast<int8_t>(bytes[1]);
                     }
@@ -902,40 +1116,69 @@ private:
     }
 
     // Retrieves type information from DIE
-    std::string GetTypeInfo(Dwarf_Die die) {
+    std::string GetTypeInfo(Dwarf_Die die)
+    {
         Dwarf_Error error = 0;
         Dwarf_Attribute type_attr = 0;
-        if (dwarf_attr(die, DW_AT_type, &type_attr, &error) == DW_DLV_OK) {
+        if (dwarf_attr(die, DW_AT_type, &type_attr, &error) == DW_DLV_OK)
+        {
             DwarfAttributeGuard guard(type_attr);
             Dwarf_Off type_offset = 0;
-            if (dwarf_global_formref(type_attr, &type_offset, &error) == DW_DLV_OK) {
+            if (dwarf_global_formref(type_attr, &type_offset, &error) == DW_DLV_OK)
+            {
                 auto it = typeMap.find(type_offset);
-                if (it != typeMap.end()) {
+                if (it != typeMap.end())
+                {
                     return it->second.name;
                 }
 
                 Dwarf_Die type_die = 0;
-                if (dwarf_offdie_b(dbg, type_offset, TRUE, &type_die, &error) == DW_DLV_OK) {
-                    char* type_name = 0;
+                if (dwarf_offdie_b(dbg, type_offset, TRUE, &type_die, &error) == DW_DLV_OK)
+                {
+                    char *type_name = 0;
                     std::string result = "unknown";
-                    if (dwarf_diename(type_die, &type_name, &error) == DW_DLV_OK && type_name) {
+                    if (dwarf_diename(type_die, &type_name, &error) == DW_DLV_OK && type_name)
+                    {
                         result = type_name;
                         dwarf_dealloc(dbg, type_name, DW_DLA_STRING);
                     }
-                    else {
+                    else
+                    {
                         Dwarf_Half tag = 0;
-                        if (dwarf_tag(type_die, &tag, &error) == DW_DLV_OK) {
-                            switch (tag) {
-                                case DW_TAG_base_type: result = "base_type"; break;
-                                case DW_TAG_pointer_type: result = "pointer"; break;
-                                case DW_TAG_array_type: result = "array"; break;
-                                case DW_TAG_structure_type: result = "struct"; break;
-                                case DW_TAG_union_type: result = "union"; break;
-                                case DW_TAG_enumeration_type: result = "enum"; break;
-                                case DW_TAG_typedef: result = "typedef"; break;
-                                case DW_TAG_const_type: result = "const"; break;
-                                case DW_TAG_volatile_type: result = "volatile"; break;
-                                case DW_TAG_subroutine_type: result = "function"; break;
+                        if (dwarf_tag(type_die, &tag, &error) == DW_DLV_OK)
+                        {
+                            switch (tag)
+                            {
+                            case DW_TAG_base_type:
+                                result = "base_type";
+                                break;
+                            case DW_TAG_pointer_type:
+                                result = "pointer";
+                                break;
+                            case DW_TAG_array_type:
+                                result = "array";
+                                break;
+                            case DW_TAG_structure_type:
+                                result = "struct";
+                                break;
+                            case DW_TAG_union_type:
+                                result = "union";
+                                break;
+                            case DW_TAG_enumeration_type:
+                                result = "enum";
+                                break;
+                            case DW_TAG_typedef:
+                                result = "typedef";
+                                break;
+                            case DW_TAG_const_type:
+                                result = "const";
+                                break;
+                            case DW_TAG_volatile_type:
+                                result = "volatile";
+                                break;
+                            case DW_TAG_subroutine_type:
+                                result = "function";
+                                break;
                             }
                         }
                     }
@@ -961,28 +1204,96 @@ private:
     std::vector<char> fileData;
 };
 
-// Manages symbol integration into x64dbg
-class SymbolManager {
-public:
-    SymbolManager(duint runtimeBase) : runtimeBase(runtimeBase) {
-        loadedSymbols.reserve(10000); // Reserve space to reduce reallocations
+static bool IsFunctionPrologue(duint address)
+{
+    if (!DbgMemIsValidReadPtr(address))
+        return false;
+
+    unsigned char buf[8] = {0};
+    SIZE_T bytesRead = 0;
+    if (!DbgMemRead(address, buf, sizeof(buf)))
+        return false;
+
+    bytesRead = sizeof(buf);
+
+    // x64: 55 48 89 E5    -- push rbp; mov rbp, rsp
+    // x86: 55 8B EC       -- push ebp; mov ebp, esp
+    // Also check for common compiler variations
+    if (buf[0] == 0x55)
+    {                                                                             // push rbp/ebp
+        if (bytesRead >= 4 && buf[1] == 0x48 && buf[2] == 0x89 && buf[3] == 0xE5) // x64
+            return true;
+        if (bytesRead >= 3 && buf[1] == 0x8B && buf[2] == 0xEC) // x86
+            return true;
+        if (bytesRead >= 4 && buf[1] == 0x48 && buf[2] == 0x8B && buf[3] == 0xEC) // x64 alternative
+            return true;
+        // Simple push rbp/ebp can also indicate function start
+        return true;
     }
 
-    // Adds parsed symbols to x64dbg
-    void AddSymbols(const std::vector<Symbol>& symbols) {
-        if (symbols.empty()) {
+    // Additional patterns for modern compilers
+    // sub rsp, imm32 (48 83 EC xx or 48 81 EC xx xx xx xx)
+    if (bytesRead >= 4 && buf[0] == 0x48 && buf[1] == 0x83 && buf[2] == 0xEC)
+        return true;
+    if (bytesRead >= 7 && buf[0] == 0x48 && buf[1] == 0x81 && buf[2] == 0xEC)
+        return true;
+
+    // mov rdi, rdi (compiler padding: 48 89 FF)
+    if (bytesRead >= 3 && buf[0] == 0x48 && buf[1] == 0x89 && buf[2] == 0xFF)
+        return true;
+
+    return false;
+}
+
+// Manages symbol integration into x64dbg
+class SymbolManager
+{
+public:
+    SymbolManager(duint runtimeBase) : runtimeBase(runtimeBase)
+    {
+        loadedSymbols.reserve(10000);
+        processedAddresses.reserve(10000); // Track processed addresses to avoid duplicates
+        processedNames.reserve(10000);     // Track processed names to avoid duplicates
+    }
+
+    // Adds parsed symbols to x64dbg with deduplication
+    void AddSymbols(const std::vector<Symbol> &symbols)
+    {
+        if (symbols.empty())
+        {
             MessageBoxA(NULL, "No symbols to load.", "DWARFHelper", MB_OK | MB_ICONWARNING);
             return;
         }
 
-        for (const auto& sym : symbols) {
-            if (sym.address == 0 && sym.location.type == LocationInfo::INVALID) continue;
-            if (sym.address != 0) AddLabel(sym);
-            if (!sym.fileName.empty() || !sym.type.empty() || sym.location.type != LocationInfo::INVALID) {
+        // Process symbols with deduplication
+        for (const auto &sym : symbols)
+        {
+            if (sym.address == 0 && sym.location.type == LocationInfo::INVALID)
+                continue;
+
+            // Skip if we already processed this symbol
+            if (IsSymbolProcessed(sym))
+                continue;
+
+            // Mark as processed
+            MarkSymbolProcessed(sym);
+
+            // Add label if address is valid
+            if (sym.address != 0)
+                AddLabel(sym);
+
+            // Add comment with enhanced information
+            if (!sym.fileName.empty() || !sym.type.empty() || sym.location.type != LocationInfo::INVALID)
+            {
                 AddComment(sym);
             }
-            if (sym.isFunction && sym.size > 0 && sym.address != 0) AddFunction(sym);
-            if (!sym.type.empty()) typeCount++;
+
+            // Add function if it's identified as function and has valid size
+            if (sym.isFunction && sym.size > 0 && sym.address != 0)
+                AddFunction(sym);
+
+            if (!sym.type.empty())
+                typeCount++;
         }
 
         GuiUpdateAllViews();
@@ -990,102 +1301,216 @@ public:
     }
 
 private:
-    // Sets a label for a symbol
-    void AddLabel(const Symbol& sym) {
+    // Check if symbol was already processed to avoid duplicates
+    bool IsSymbolProcessed(const Symbol &sym)
+    {
+        // Check by address first (most reliable)
+        if (sym.address != 0 && processedAddresses.count(sym.address))
+        {
+            return true;
+        }
+
+        // Check by name for variables without addresses
+        if (!sym.name.empty() && processedNames.count(sym.name))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    // Mark symbol as processed
+    void MarkSymbolProcessed(const Symbol &sym)
+    {
+        if (sym.address != 0)
+        {
+            processedAddresses.insert(sym.address);
+        }
+        if (!sym.name.empty())
+        {
+            processedNames.insert(sym.name);
+        }
+    }
+
+    // Sets a label for a symbol with duplicate checking
+    void AddLabel(const Symbol &sym)
+    {
         char existingLabel[MAX_LABEL_SIZE] = "";
         bool hasExisting = DbgGetLabelAt(sym.address, SEG_DEFAULT, existingLabel) && strlen(existingLabel) > 0;
-        if (!hasExisting && DbgSetLabelAt(sym.address, sym.name.c_str())) {
+
+        if (!hasExisting && DbgSetLabelAt(sym.address, sym.name.c_str()))
+        {
             labelCount++;
             DPRINTF("Set label: %s at 0x%llX", sym.name.c_str(), sym.address);
         }
     }
 
-    // Adds a comment for a symbol
-    void AddComment(const Symbol& sym) {
+    // Adds a comment for a symbol with enhanced function detection
+    void AddComment(const Symbol &sym)
+    {
+        // Extract filename for display
         std::string filename = sym.fileName;
         size_t lastSlash = filename.find_last_of("/\\");
-        if (lastSlash != std::string::npos) filename = filename.substr(lastSlash + 1);
+        if (lastSlash != std::string::npos)
+            filename = filename.substr(lastSlash + 1);
 
-        char comment[1024] = "";
-        if (sym.location.type == LocationInfo::ADDRESS) {
-            snprintf(comment + strlen(comment), sizeof(comment) - strlen(comment), " @0x%llX", sym.location.address);
-        }
-        else if (sym.location.type == LocationInfo::REGISTER) {
-            snprintf(comment + strlen(comment), sizeof(comment) - strlen(comment), " reg%d", sym.location.reg);
-        }
-        else if (sym.location.type == LocationInfo::STACK_OFFSET) {
-            snprintf(comment + strlen(comment), sizeof(comment) - strlen(comment), " [%+d]", sym.location.offset);
-        }
+        char comment[2048] = "";
 
-        if (sym.isFunction) {
+        // Build location info string
+        std::string locationInfo = BuildLocationInfo(sym);
+
+        // Determine if this is actually a function by checking prologue or DWARF info
+        bool isActualFunction = sym.isFunction || (sym.address != 0 && IsFunctionPrologue(sym.address));
+
+        if (isActualFunction)
+        {
+            // Format as function
             std::string lineStr = (sym.line > 0) ? (":" + std::to_string(sym.line)) : "";
             snprintf(comment, sizeof(comment),
-                     "Function: %s%s%s (size: %llu)%s%s%s - %s%s",
-                     sym.name.c_str(), sym.type.empty() ? "" : " -> ", sym.type.c_str(),
-                     sym.size, sym.linkageName.empty() ? "" : " [", sym.linkageName.c_str(),
-                     sym.linkageName.empty() ? "" : "]", filename.c_str(), lineStr.c_str());
+                     "Function: %s%s%s%s%s%s%s%s - %s%s",
+                     sym.name.c_str(),
+                     sym.type.empty() ? "" : " -> ",
+                     sym.type.c_str(),
+                     sym.size > 0 ? " (size: " : "",
+                     sym.size > 0 ? std::to_string(sym.size).c_str() : "",
+                     sym.size > 0 ? ")" : "",
+                     sym.linkageName.empty() ? "" : " [",
+                     sym.linkageName.empty() ? "" : (sym.linkageName + "]").c_str(),
+                     filename.c_str(),
+                     lineStr.c_str());
         }
-        else {
-            std::string symStr = (sym.line > 0) ? (":" + std::to_string(sym.line)) : "";
+        else
+        {
+            // Format as symbol/variable
+            std::string lineStr = (sym.line > 0) ? (":" + std::to_string(sym.line)) : "";
             snprintf(comment, sizeof(comment),
-                     "Symbol: %s%s%s%s%s - %s%s",
-                     sym.name.c_str(), sym.type.empty() ? "" : " (", sym.type.c_str(),
-                     sym.type.empty() ? "" : ")", comment, filename.c_str(), symStr.c_str());
+                     "Symbol: %s%s%s%s%s%s - %s%s",
+                     sym.name.c_str(),
+                     sym.type.empty() ? "" : " (",
+                     sym.type.c_str(),
+                     sym.type.empty() ? "" : ")",
+                     locationInfo.empty() ? "" : " ",
+                     locationInfo.c_str(),
+                     filename.c_str(),
+                     lineStr.c_str());
         }
 
-        if (sym.address != 0) {
-            char existingComment[1024] = "";
+        // Add comment only if address is valid and comment doesn't already exist
+        if (sym.address != 0)
+        {
+            char existingComment[2048] = "";
             bool hasComment = DbgGetCommentAt(sym.address, existingComment) && strlen(existingComment) > 0;
-            if (hasComment) {
-                char newComment[2048] = "";
+
+            // Check if our comment is already there to avoid duplicates
+            if (hasComment && strstr(existingComment, comment) != nullptr)
+            {
+                return; // Comment already exists
+            }
+
+            if (hasComment)
+            {
+                // Append to existing comment
+                char newComment[4096] = "";
                 snprintf(newComment, sizeof(newComment), "%s\n%s", existingComment, comment);
-                if (DbgSetCommentAt(sym.address, newComment)) {
+                if (DbgSetCommentAt(sym.address, newComment))
+                {
                     commentCount++;
                     DPRINTF("Appended comment for %s at 0x%llX", sym.name.c_str(), sym.address);
                 }
             }
-            else if (DbgSetCommentAt(sym.address, comment)) {
-                commentCount++;
-                DPRINTF("Set comment for %s at 0x%llX", sym.name.c_str(), sym.address);
+            else
+            {
+                // Set new comment
+                if (DbgSetCommentAt(sym.address, comment))
+                {
+                    commentCount++;
+                    DPRINTF("Set comment for %s at 0x%llX", sym.name.c_str(), sym.address);
+                }
             }
         }
     }
 
-    // Adds a function definition
-    void AddFunction(const Symbol& sym) {
+    // Build location information string
+    std::string BuildLocationInfo(const Symbol &sym)
+    {
+        std::string locationInfo;
+
+        switch (sym.location.type)
+        {
+        case LocationInfo::ADDRESS:
+            locationInfo = "@0x" + std::to_string(sym.location.address);
+            break;
+        case LocationInfo::REGISTER:
+            locationInfo = "reg" + std::to_string(sym.location.reg);
+            break;
+        case LocationInfo::STACK_OFFSET:
+            locationInfo = std::string("[") +
+                           (sym.location.offset >= 0 ? "+" : "") +
+                           std::to_string(sym.location.offset) +
+                           "]";
+            break;
+        case LocationInfo::EXPRESSION:
+            locationInfo = "expr";
+            break;
+        case LocationInfo::INVALID:
+        default:
+            break;
+        }
+
+        return locationInfo;
+    }
+    // Adds a function definition with validation
+    void AddFunction(const Symbol &sym)
+    {
+        // Validate memory properties before creating function
         MEMORY_BASIC_INFORMATION mbi = {0};
-        if (VirtualQuery((LPCVOID)sym.address, &mbi, sizeof(mbi))) {
-            bool isExecutable = (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+        if (VirtualQuery((LPCVOID)sym.address, &mbi, sizeof(mbi)))
+        {
+            bool isExecutable = (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
             bool isCommitted = (mbi.State == MEM_COMMIT);
-            if (isCommitted && isExecutable) {
+
+            if (isCommitted && isExecutable)
+            {
+                // Remove existing function first to avoid conflicts
                 DbgFunctionDel(sym.address);
-                if (DbgFunctionAdd(sym.address, sym.endAddress)) {
+
+                // Create new function
+                if (DbgFunctionAdd(sym.address, sym.endAddress))
+                {
                     functionCount++;
-                    DPRINTF("Created function: %s at 0x%llX-0x%llX", sym.name.c_str(), sym.address, sym.endAddress);
+                    DPRINTF("Created function: %s at 0x%llX-0x%llX",
+                            sym.name.c_str(), sym.address, sym.endAddress);
                 }
             }
         }
     }
 
     // Displays results of symbol loading
-    void ShowResults(size_t totalSymbols) {
+    void ShowResults(size_t totalSymbols)
+    {
         char msg[1024];
         snprintf(msg, sizeof(msg),
                  "DWARF Symbols Loaded Successfully!\n\n"
-                 "Labels set: %d/%zu\n"
+                 "Total symbols processed: %zu\n"
+                 "Labels set: %d\n"
                  "Functions created: %d\n"
                  "Comments added: %d\n"
                  "Types processed: %d\n"
-                 "Compilation units: %zu\n\n"
+                 "Duplicates skipped: %zu\n\n"
                  "Features:\n"
+                 "• Function prologue detection\n"
                  "• Enhanced type information\n"
                  "• Location expressions (DW_OP_*)\n"
-                 "• Compilation directories\n"
+                 "• Duplicate prevention\n"
                  "• DWARF 5 compatibility",
-                 labelCount, totalSymbols, functionCount, commentCount, typeCount, compDirMap.size());
+                 totalSymbols, labelCount, functionCount, commentCount, typeCount,
+                 totalSymbols - (labelCount + functionCount));
+
         MessageBoxA(NULL, msg, "DWARFHelper", MB_OK | MB_ICONINFORMATION);
-        DPRINTF("LoadSymbols completed: %d labels, %d functions, %d comments, %d types",
-                labelCount, functionCount, commentCount, typeCount);
+        DPRINTF("LoadSymbols completed: %d labels, %d functions, %d comments, %d types, %zu duplicates avoided",
+                labelCount, functionCount, commentCount, typeCount,
+                totalSymbols - (labelCount + functionCount));
     }
 
     duint runtimeBase;
@@ -1094,53 +1519,69 @@ private:
     int commentCount = 0;
     int typeCount = 0;
     std::vector<Symbol> loadedSymbols;
+    std::unordered_set<duint> processedAddresses;   // Track processed addresses
+    std::unordered_set<std::string> processedNames; // Track processed names
     std::map<std::string, std::string> compDirMap;
 };
 
 // Manages user interface interactions
-class UiManager {
+class UiManager
+{
 public:
     // Initializes plugin menu entries
-    static void InitializeMenu(PLUG_SETUPSTRUCT* setupStruct) {
+    static void InitializeMenu(PLUG_SETUPSTRUCT *setupStruct)
+    {
         menuHandleLabelsDWARF = _plugin_menuaddentry(setupStruct->hMenu, MA_LABELS_DWARF, "Load DWARF Symbols from File");
         menuHandleAbout = _plugin_menuaddentry(setupStruct->hMenu, MA_ABOUT, "About");
     }
 
     // Handles menu actions
-    static void HandleMenuAction(int menuEntry) {
-        switch (menuEntry) {
-            case MA_LABELS_DWARF: LoadSymbolsFromFile(); break;
-            case MA_ABOUT: ShowAboutDialog(); break;
+    static void HandleMenuAction(int menuEntry)
+    {
+        switch (menuEntry)
+        {
+        case MA_LABELS_DWARF:
+            LoadSymbolsFromFile();
+            break;
+        case MA_ABOUT:
+            ShowAboutDialog();
+            break;
         }
         GuiUpdateDisassemblyView();
     }
 
 private:
     // Loads symbols from a selected file
-    static void LoadSymbolsFromFile() {
-        if (!DbgIsDebugging()) {
+    static void LoadSymbolsFromFile()
+    {
+        if (!DbgIsDebugging())
+        {
             MessageBoxA(NULL, "No process is being debugged.", PLUGIN_NAME, MB_OK | MB_ICONERROR);
             return;
         }
 
         auto runtimeBase = FileHandler::GetModuleBase();
-        if (!runtimeBase) {
+        if (!runtimeBase)
+        {
             MessageBoxA(NULL, "Failed to get module base.", PLUGIN_NAME, MB_OK | MB_ICONERROR);
             return;
         }
 
         auto filePath = FileHandler::OpenFileDialog(runtimeBase);
-        if (!filePath) return;
+        if (!filePath)
+            return;
 
         DwarfParser parser(runtimeBase);
-        if (parser.ParseFile(*filePath)) {
+        if (parser.ParseFile(*filePath))
+        {
             SymbolManager manager(runtimeBase);
             manager.AddSymbols(parser.GetSymbols());
         }
     }
 
     // Displays the about dialog
-    static void ShowAboutDialog() {
+    static void ShowAboutDialog()
+    {
         MessageBoxA(NULL, "DWARFHelper Plugin v1.1 \nLoad DWARF symbols as labels\n By CynicRus", PLUGIN_NAME, MB_OK | MB_ICONINFORMATION);
     }
 
@@ -1152,10 +1593,12 @@ int UiManager::menuHandleLabelsDWARF = 0;
 int UiManager::menuHandleAbout = 0;
 
 // Core plugin functionality
-class PluginCore {
+class PluginCore
+{
 public:
     // Initializes the plugin
-    static bool Initialize(PLUG_INITSTRUCT* initStruct) {
+    static bool Initialize(PLUG_INITSTRUCT *initStruct)
+    {
         initStruct->pluginVersion = PLUGIN_VERSION;
         initStruct->sdkVersion = PLUG_SDKVERSION;
         strncpy_s(initStruct->pluginName, PLUGIN_NAME, sizeof(initStruct->pluginName));
@@ -1165,13 +1608,15 @@ public:
     }
 
     // Sets up the plugin
-    static void Setup(PLUG_SETUPSTRUCT* setupStruct) {
+    static void Setup(PLUG_SETUPSTRUCT *setupStruct)
+    {
         hwndDlg = setupStruct->hwndDlg;
         UiManager::InitializeMenu(setupStruct);
     }
 
     // Shuts down the plugin
-    static bool Shutdown() {
+    static bool Shutdown()
+    {
         _plugin_menuclear(pluginHandle);
         return true;
     }
@@ -1185,24 +1630,30 @@ int PluginCore::pluginHandle = 0;
 HWND PluginCore::hwndDlg = nullptr;
 
 // Plugin entry points
-PLUG_EXPORT bool pluginit(PLUG_INITSTRUCT* initStruct) {
+PLUG_EXPORT bool pluginit(PLUG_INITSTRUCT *initStruct)
+{
     return PluginCore::Initialize(initStruct);
 }
 
-PLUG_EXPORT void plugsetup(PLUG_SETUPSTRUCT* setupStruct) {
+PLUG_EXPORT void plugsetup(PLUG_SETUPSTRUCT *setupStruct)
+{
     PluginCore::Setup(setupStruct);
 }
 
-PLUG_EXPORT bool plugstop() {
+PLUG_EXPORT bool plugstop()
+{
     return PluginCore::Shutdown();
 }
 
-PLUG_EXPORT void CBMENUENTRY(CBTYPE cbType, PLUG_CB_MENUENTRY* info) {
-    if (cbType == CB_MENUENTRY && info) {
+PLUG_EXPORT void CBMENUENTRY(CBTYPE cbType, PLUG_CB_MENUENTRY *info)
+{
+    if (cbType == CB_MENUENTRY && info)
+    {
         UiManager::HandleMenuAction(info->hEntry);
     }
 }
 
-BOOL WINAPI DllMain([[maybe_unused]] HINSTANCE hinstDLL, [[maybe_unused]] DWORD fdwReason, [[maybe_unused]] LPVOID lpvReserved) {
+BOOL WINAPI DllMain([[maybe_unused]] HINSTANCE hinstDLL, [[maybe_unused]] DWORD fdwReason, [[maybe_unused]] LPVOID lpvReserved)
+{
     return TRUE;
 }
