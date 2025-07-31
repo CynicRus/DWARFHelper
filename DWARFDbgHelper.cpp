@@ -10,7 +10,6 @@
 #include <fstream>
 #include <memory>
 #include <optional>
-#include <regex>
 #include <dwarf.h>
 #include <libdwarf.h>
 #include "bridgemain.h"
@@ -410,38 +409,146 @@ public:
     // Cleans symbol names for x64dbg compatibility
     static std::string CleanSymbolName(const std::string &name)
     {
-        std::string cleaned = name;
+        if (name.empty())
+            return "Symbol";
 
-        std::regex multiUnderscore("_{3,}"); 
-        cleaned = std::regex_replace(cleaned, multiUnderscore, "::");
+        std::string cleaned;
+        cleaned.reserve(name.size()); // Pre-allocate memory
 
-        std::regex doubleUnderscore("__");
-        cleaned = std::regex_replace(cleaned, doubleUnderscore, "::");
+        const char *data = name.c_str();
+        size_t len = name.size();
 
-        std::regex finalizerPattern(R"(\$\$_fin\$[0-9A-F]+$)");
-        cleaned = std::regex_replace(cleaned, finalizerPattern, "");
-
-        std::replace(cleaned.begin(), cleaned.end(), '$', ':');
-        std::regex quadColon("::::");
-        cleaned = std::regex_replace(cleaned, quadColon, "::");
-
-        for (char &c : cleaned)
-        {
-            if (!std::isalnum(c) && c != '_' && c != ':')
+        // Remove finalizer pattern first ($$_fin$[0-9A-F]+$)
+        size_t effectiveLen = len;
+        if (len >= 8)
+        { // Minimum pattern length
+            size_t pos = len;
+            while (pos >= 8)
             {
-                c = '_';
+                pos--;
+                if (data[pos - 6] == '$' && data[pos - 5] == '$' &&
+                    data[pos - 4] == '_' && data[pos - 3] == 'f' &&
+                    data[pos - 2] == 'i' && data[pos - 1] == 'n' && data[pos] == '$')
+                {
+                    // Found potential start, check if rest is hex
+                    size_t hexStart = pos + 1;
+                    bool isValidPattern = true;
+                    for (size_t i = hexStart; i < len; i++)
+                    {
+                        char c = data[i];
+                        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')))
+                        {
+                            isValidPattern = false;
+                            break;
+                        }
+                    }
+                    if (isValidPattern && hexStart < len)
+                    {
+                        effectiveLen = pos - 6;
+                        break;
+                    }
+                }
             }
         }
 
-        while (!cleaned.empty() && (cleaned.front() == '_' || cleaned.front() == ':'))
-            cleaned.erase(cleaned.begin());
-        while (!cleaned.empty() && (cleaned.back() == '_' || cleaned.back() == ':'))
-            cleaned.pop_back();
+        // Process character by character
+        for (size_t i = 0; i < effectiveLen; i++)
+        {
+            char c = data[i];
 
-        std::regex emptySegments("::{2,}");
-        cleaned = std::regex_replace(cleaned, emptySegments, "::");
+            // Handle underscore sequences and convert to ::
+            if (c == '_')
+            {
+                size_t underscoreCount = 0;
+                size_t j = i;
+                while (j < effectiveLen && data[j] == '_')
+                {
+                    underscoreCount++;
+                    j++;
+                }
 
-        return cleaned.empty() ? "Symbol" : cleaned;
+                if (underscoreCount >= 2)
+                {
+                    cleaned += "::";
+                }
+                else
+                {
+                    cleaned += '_';
+                }
+                i = j - 1; // Skip processed underscores
+            }
+            // Replace $ with :
+            else if (c == '$')
+            {
+                cleaned += ':';
+            }
+            // Keep alphanumeric, underscore, and colon
+            else if (std::isalnum(c) || c == ':')
+            {
+                cleaned += c;
+            }
+            // Replace other characters with underscore
+            else
+            {
+                cleaned += '_';
+            }
+        }
+
+        // Handle consecutive colons (:::: -> ::)
+        std::string result;
+        result.reserve(cleaned.size());
+
+        for (size_t i = 0; i < cleaned.size(); i++)
+        {
+            if (cleaned[i] == ':')
+            {
+                size_t colonCount = 0;
+                size_t j = i;
+                while (j < cleaned.size() && cleaned[j] == ':')
+                {
+                    colonCount++;
+                    j++;
+                }
+
+                if (colonCount >= 2)
+                {
+                    result += "::";
+                }
+                else
+                {
+                    result += ':';
+                }
+                i = j - 1;
+            }
+            else
+            {
+                result += cleaned[i];
+            }
+        }
+
+        // Trim leading and trailing underscores/colons
+        size_t start = 0;
+        while (start < result.size() && (result[start] == '_' || result[start] == ':'))
+        {
+            start++;
+        }
+
+        size_t end = result.size();
+        while (end > start && (result[end - 1] == '_' || result[end - 1] == ':'))
+        {
+            end--;
+        }
+
+        if (start < end)
+        {
+            result = result.substr(start, end - start);
+        }
+        else
+        {
+            result.clear();
+        }
+
+        return result.empty() ? "Symbol" : result;
     }
 
     // Validates if an address is within module bounds
